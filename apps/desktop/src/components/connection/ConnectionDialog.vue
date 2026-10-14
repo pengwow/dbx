@@ -1076,6 +1076,8 @@ const mqOauthScope = ref("");
 const mqTlsSkipVerify = ref(false);
 const mqPinnedVersion = ref(pinnedVersionToSelection(undefined));
 const kafkaTls = reactive<KafkaTlsConfig>(kafkaTlsFromExternalConfig(undefined));
+// mTLS 开关是派生态：由 cert/key 是否有值反推，不写入 external_config，旧连接零迁移。
+const mqKafkaMtlsEnabled = ref(false);
 const mqTokenSigningMode = ref<MqTokenSigningMode>("none");
 const mqTokenSigningKey = ref("");
 const MQ_DRIVER_LABELS: Record<MqSystemKind, string> = {
@@ -1454,6 +1456,8 @@ function resetMqFields(config?: Partial<MqAdminConfig>) {
   mqTlsSkipVerify.value = !!config?.tlsSkipVerify;
   // Kafka TLS PEM 路径来自顶层 tls section；无 config 时返回全空，顺带清空表单。
   Object.assign(kafkaTls, kafkaTlsFromExternalConfig(config));
+  // 开关由 cert/key 反推：任一非空即勾选，兼容已存三字段的旧连接。
+  mqKafkaMtlsEnabled.value = !!(kafkaTls.client_cert_path.trim() || kafkaTls.client_key_path.trim());
   mqPinnedVersion.value = pinnedVersionToSelection(config?.pinnedVersion);
   const auth = (config?.auth || { kind: "none" }) as MqAuth;
   mqAuthKind.value = detectMqUiAuthKind({
@@ -2223,12 +2227,17 @@ function buildMqAdminConfig(): MqAdminConfig {
       }
     }
     if (Object.keys(properties).length) extra.properties = properties;
+    // TLS 区只在协议实际启用 TLS 时参与构建与校验（与表单显隐用同一判据）：
+    // PLAINTEXT 等场景下隐藏字段里的残留值不应触发误拦截，tls 也不落盘。
+    // 开关关闭时 cert/key 不落盘；半套配置在此硬拦截，错误沿 requireMqField 同一展示路径。
+    const kafkaTlsSection = mqKafkaTlsVisible.value ? buildKafkaTlsSection(kafkaTls, { clientCertEnabled: mqKafkaMtlsEnabled.value }) : { ok: true as const, tls: undefined };
+    if (!kafkaTlsSection.ok) throw new Error(t(kafkaTlsSection.messageKey));
     return {
       systemKind: mqSystemKind.value,
       adminUrl: "",
       auth: buildMqAuth(),
       tlsSkipVerify: mqTlsSkipVerify.value || undefined,
-      tls: buildKafkaTlsSection(kafkaTls)?.tls,
+      tls: kafkaTlsSection.tls,
       extra,
     };
   }
@@ -8369,7 +8378,8 @@ function openExternalUrl(url: string) {
                         <Input v-model="mqOauthScope" class="col-span-3" />
                       </div>
                     </template>
-                    <div class="grid grid-cols-4 items-center gap-4">
+                    <!-- 跳过证书校验只在 Kafka TLS 协议下有意义，与下方 CA/mTLS 区共享可见性条件 -->
+                    <div v-if="mqSystemKind === 'kafka' && mqKafkaTlsVisible" class="grid grid-cols-4 items-center gap-4">
                       <Label :class="connectionLabelSmallClass">{{ t("connection.mqTls") }}</Label>
                       <label class="col-span-3 inline-flex items-center gap-2">
                         <input type="checkbox" v-model="mqTlsSkipVerify" class="mr-0" />
@@ -8392,6 +8402,19 @@ function openExternalUrl(url: string) {
                         </div>
                       </div>
                       <div class="grid grid-cols-4 items-center gap-4">
+                        <span></span>
+                        <!-- 开关行：样式复用 redisSentinelTls checkbox 行；hint 段参照 mongo 的说明文字样式 -->
+                        <label class="col-span-3 inline-flex items-center gap-2">
+                          <input type="checkbox" v-model="mqKafkaMtlsEnabled" class="mr-0" />
+                          <span class="text-xs text-muted-foreground">{{ t("connection.mqKafkaMtlsEnabled") }}</span>
+                        </label>
+                      </div>
+                      <!-- hint 行：独立 grid 容器，第一列空 div 对齐 Label 列；Kerberos hint 行同结构 -->
+                      <div class="grid grid-cols-4 items-start gap-4">
+                        <div></div>
+                        <div class="col-span-3 text-xs leading-5 text-muted-foreground">{{ t("connection.mqKafkaMtlsHint") }}</div>
+                      </div>
+                      <div v-if="mqKafkaMtlsEnabled" class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqKafkaTlsClientCert") }}</Label>
                         <div class="col-span-3 flex items-center gap-1">
                           <Input v-model="kafkaTls.client_cert_path" class="flex-1" placeholder="/certs/client.crt" />
@@ -8405,7 +8428,7 @@ function openExternalUrl(url: string) {
                           </Tooltip>
                         </div>
                       </div>
-                      <div class="grid grid-cols-4 items-center gap-4">
+                      <div v-if="mqKafkaMtlsEnabled" class="grid grid-cols-4 items-center gap-4">
                         <Label :class="connectionLabelClass">{{ t("connection.mqKafkaTlsClientKey") }}</Label>
                         <div class="col-span-3 flex items-center gap-1">
                           <Input v-model="kafkaTls.client_key_path" class="flex-1" placeholder="/certs/client.key" />

@@ -19,11 +19,24 @@ export function kafkaTlsFromExternalConfig(value: unknown): KafkaTlsConfig {
   };
 }
 
-export function buildKafkaTlsSection(tls: KafkaTlsConfig): { tls: KafkaTlsConfig } | undefined {
+// 判别联合返回：dialog 层对 ok:false 抛错，ok:true 时 tls 可缺省。
+export type KafkaTlsSectionResult = { ok: true; tls?: KafkaTlsConfig } | { ok: false; messageKey: string };
+
+export function buildKafkaTlsSection(tls: KafkaTlsConfig, options: { clientCertEnabled: boolean }): KafkaTlsSectionResult {
   const caCertPath = tls.ca_cert_path.trim();
   const clientCertPath = tls.client_cert_path.trim();
   const clientKeyPath = tls.client_key_path.trim();
-  // 三个路径全空时不落 tls section，保持旧连接的 external_config 形状不变。
-  if (!caCertPath && !clientCertPath && !clientKeyPath) return undefined;
-  return { tls: { ca_cert_path: caCertPath, client_cert_path: clientCertPath, client_key_path: clientKeyPath } };
+
+  // 开关关闭：cert/key 一律丢弃（表单值保留在 dialog reactive 态里，不受影响），仅 CA 生效。
+  if (!options.clientCertEnabled) {
+    if (!caCertPath) return { ok: true };
+    return { ok: true, tls: { ca_cert_path: caCertPath, client_cert_path: "", client_key_path: "" } };
+  }
+
+  // 开关开启：cert/key 必须成对，否则硬拦截；提示语允许"同时留空"（等效单向 TLS）。
+  if (!clientCertPath !== !clientKeyPath) {
+    return { ok: false, messageKey: "connection.mqKafkaTlsClientCertPairRequired" };
+  }
+  if (!caCertPath && !clientCertPath) return { ok: true };
+  return { ok: true, tls: { ca_cert_path: caCertPath, client_cert_path: clientCertPath, client_key_path: clientKeyPath } };
 }
